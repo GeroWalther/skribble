@@ -5,6 +5,7 @@
 #   ./build.sh --debug    debug build
 #   ./build.sh --install  release build, then copy to /Applications
 #   ./build.sh --run      release build, then launch
+#   ./build.sh --dmg      release build, then package build/Skribble.dmg
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -12,6 +13,7 @@ cd "$(dirname "$0")"
 CONFIG="release"
 INSTALL=false
 RUN=false
+DMG=false
 
 for arg in "$@"; do
   case "$arg" in
@@ -19,6 +21,7 @@ for arg in "$@"; do
     --release) CONFIG="release" ;;
     --install) INSTALL=true ;;
     --run)     RUN=true ;;
+    --dmg)     DMG=true ;;
     *) echo "unknown option: $arg" >&2; exit 1 ;;
   esac
 done
@@ -105,6 +108,23 @@ if [ "$INSTALL" = true ]; then
   rm -rf "/Applications/$APP_NAME.app"
   cp -R "$APP" "/Applications/$APP_NAME.app"
   echo "    /Applications/$APP_NAME.app"
+fi
+
+if [ "$DMG" = true ]; then
+  echo "==> Packaging disk image"
+  STAGE="$OUT_DIR/dmg"
+  DMG_PATH="$OUT_DIR/$APP_NAME.dmg"
+  rm -rf "$STAGE" "$DMG_PATH"
+  mkdir -p "$STAGE"
+  cp -R "$APP" "$STAGE/$APP_NAME.app"
+  ln -s /Applications "$STAGE/Applications"
+  hdiutil create -quiet \
+    -volname "$APP_NAME" \
+    -srcfolder "$STAGE" \
+    -ov -format UDZO \
+    "$DMG_PATH"
+  rm -rf "$STAGE"
+  echo "    $DMG_PATH ($(du -h "$DMG_PATH" | cut -f1))"
 fi
 
 if [ "$RUN" = true ]; then
