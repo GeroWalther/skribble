@@ -28,6 +28,7 @@ RUN=false
 DMG=false
 NOTARIZE=false
 NOTARY_PROFILE="${NOTARY_PROFILE:-skribble-notary}"
+TEAM_ID="W67AW8RFW4"
 
 for arg in "$@"; do
   case "$arg" in
@@ -134,6 +135,37 @@ fi
 
 echo "==> Built $APP"
 
+# The app is notarized and stapled before the disk image is built, so the
+# ticket travels inside the bundle. Stapling only the .dmg leaves the app
+# unverifiable once it has been dragged out of it and opened offline.
+if [ "$NOTARIZE" = true ]; then
+  if ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" \
+       >/dev/null 2>&1; then
+    echo "" >&2
+    echo "    No working notarytool profile named '$NOTARY_PROFILE'." >&2
+    echo "    Create it once, in your own Terminal:" >&2
+    echo "" >&2
+    echo "      xcrun notarytool store-credentials \"$NOTARY_PROFILE\" \\" >&2
+    echo "          --apple-id \"you@example.com\" --team-id \"$TEAM_ID\"" >&2
+    echo "" >&2
+    exit 1
+  fi
+
+  echo "==> Notarizing the app (1-5 minutes)"
+  APP_ZIP="$OUT_DIR/$APP_NAME-notarize.zip"
+  rm -f "$APP_ZIP"
+  # ditto, not zip: it preserves the bundle's symlinks and extended attributes,
+  # without which the signature no longer validates on the far end.
+  ditto -c -k --keepParent "$APP" "$APP_ZIP"
+  xcrun notarytool submit "$APP_ZIP" \
+    --keychain-profile "$NOTARY_PROFILE" --wait
+  rm -f "$APP_ZIP"
+
+  echo "==> Stapling the app"
+  xcrun stapler staple "$APP"
+  xcrun stapler validate "$APP"
+fi
+
 if [ "$INSTALL" = true ]; then
   echo "==> Installing to /Applications"
   rm -rf "/Applications/$APP_NAME.app"
@@ -158,19 +190,7 @@ if [ "$DMG" = true ]; then
   echo "    $DMG_PATH ($(du -h "$DMG_PATH" | cut -f1))"
 
   if [ "$NOTARIZE" = true ]; then
-    if ! security find-generic-password -s "com.apple.gke.notary.tool" \
-         -a "$NOTARY_PROFILE" >/dev/null 2>&1; then
-      echo "" >&2
-      echo "    No notarytool profile named '$NOTARY_PROFILE'." >&2
-      echo "    Create it once, in your own Terminal:" >&2
-      echo "" >&2
-      echo "      xcrun notarytool store-credentials \"$NOTARY_PROFILE\" \\" >&2
-      echo "          --apple-id \"you@example.com\" --team-id \"W67AW8RFW4\"" >&2
-      echo "" >&2
-      exit 1
-    fi
-
-    echo "==> Notarizing (this usually takes 1-5 minutes)"
+    echo "==> Notarizing the disk image (1-5 minutes)"
     # Signing the DMG too means the disk image itself also passes Gatekeeper.
     codesign --force --sign "$SIGN_ID" --timestamp "$DMG_PATH"
     xcrun notarytool submit "$DMG_PATH" \
