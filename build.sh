@@ -6,6 +6,18 @@
 #   ./build.sh --install  release build, then copy to /Applications
 #   ./build.sh --run      release build, then launch
 #   ./build.sh --dmg      release build, then package build/Skribble.dmg
+#   ./build.sh --notarize --dmg
+#                         sign with Developer ID, notarize and staple the DMG
+#                         so it opens on other Macs with no Gatekeeper warning
+#
+# Notarizing needs a one-time credential, stored in your keychain (never in a
+# file). Run this yourself once, in your own Terminal:
+#
+#   xcrun notarytool store-credentials "skribble-notary" \
+#       --apple-id "you@example.com" --team-id "W67AW8RFW4"
+#
+# It asks for an app-specific password, which you create at appleid.apple.com
+# under Sign-In and Security. Override the profile name with NOTARY_PROFILE.
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -14,14 +26,17 @@ CONFIG="release"
 INSTALL=false
 RUN=false
 DMG=false
+NOTARIZE=false
+NOTARY_PROFILE="${NOTARY_PROFILE:-skribble-notary}"
 
 for arg in "$@"; do
   case "$arg" in
-    --debug)   CONFIG="debug" ;;
-    --release) CONFIG="release" ;;
-    --install) INSTALL=true ;;
-    --run)     RUN=true ;;
-    --dmg)     DMG=true ;;
+    --debug)    CONFIG="debug" ;;
+    --release)  CONFIG="release" ;;
+    --install)  INSTALL=true ;;
+    --run)      RUN=true ;;
+    --dmg)      DMG=true ;;
+    --notarize) NOTARIZE=true; DMG=true ;;
     *) echo "unknown option: $arg" >&2; exit 1 ;;
   esac
 done
@@ -95,11 +110,27 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Ad-hoc signature so macOS is willing to launch the bundle and remember any
-# Screen Recording permission granted to it.
-echo "==> Signing (ad-hoc)"
-codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 || \
-  echo "    (codesign failed; the app will still run)"
+# Notarization requires a real Developer ID signature, the hardened runtime and
+# a secure timestamp. Without --notarize we fall back to an ad-hoc signature,
+# which runs fine locally but trips Gatekeeper once the app has been downloaded.
+if [ "$NOTARIZE" = true ]; then
+  SIGN_ID="$(security find-identity -v -p codesigning \
+             | grep "Developer ID Application" \
+             | head -1 | sed -E 's/.*"(.*)"/\1/')"
+  if [ -z "$SIGN_ID" ]; then
+    echo "    no 'Developer ID Application' certificate in the keychain." >&2
+    echo "    Install one from developer.apple.com before notarizing." >&2
+    exit 1
+  fi
+  echo "==> Signing ($SIGN_ID)"
+  codesign --force --deep --options runtime --timestamp \
+           --sign "$SIGN_ID" "$APP"
+  codesign --verify --strict --verbose=2 "$APP"
+else
+  echo "==> Signing (ad-hoc)"
+  codesign --force --sign - --timestamp=none "$APP" >/dev/null 2>&1 || \
+    echo "    (codesign failed; the app will still run)"
+fi
 
 echo "==> Built $APP"
 
@@ -125,6 +156,33 @@ if [ "$DMG" = true ]; then
     "$DMG_PATH"
   rm -rf "$STAGE"
   echo "    $DMG_PATH ($(du -h "$DMG_PATH" | cut -f1))"
+
+  if [ "$NOTARIZE" = true ]; then
+    if ! security find-generic-password -s "com.apple.gke.notary.tool" \
+         -a "$NOTARY_PROFILE" >/dev/null 2>&1; then
+      echo "" >&2
+      echo "    No notarytool profile named '$NOTARY_PROFILE'." >&2
+      echo "    Create it once, in your own Terminal:" >&2
+      echo "" >&2
+      echo "      xcrun notarytool store-credentials \"$NOTARY_PROFILE\" \\" >&2
+      echo "          --apple-id \"you@example.com\" --team-id \"W67AW8RFW4\"" >&2
+      echo "" >&2
+      exit 1
+    fi
+
+    echo "==> Notarizing (this usually takes 1-5 minutes)"
+    # Signing the DMG too means the disk image itself also passes Gatekeeper.
+    codesign --force --sign "$SIGN_ID" --timestamp "$DMG_PATH"
+    xcrun notarytool submit "$DMG_PATH" \
+      --keychain-profile "$NOTARY_PROFILE" --wait
+
+    echo "==> Stapling"
+    # Stapling attaches the ticket to the file so it validates offline.
+    xcrun stapler staple "$DMG_PATH"
+    xcrun stapler validate "$DMG_PATH"
+    spctl --assess --type open --context context:primary-signature -v "$DMG_PATH"
+    echo "    Notarized and stapled."
+  fi
 fi
 
 if [ "$RUN" = true ]; then
